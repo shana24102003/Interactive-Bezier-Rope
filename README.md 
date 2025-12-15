@@ -1,0 +1,26 @@
+# Interactive Cubic Bézier Rope (Web)
+
+## Overview
+Cubic Bézier curve that behaves like a springy rope. Middle control points move dynamically via mouse, touch, or device tilt.
+
+## Math
+- Bézier: B(t) = (1-t)^3 P0 + 3(1-t)^2 t P1 + 3(1-t) t^2 P2 + t^3 P3
+- Tangent: B'(t) = 3(1-t)^2 (P1-P0) + 6(1-t)t (P2-P1) + 3 t^2 (P3-P2)
+
+## Physics
+- Spring-damper: a = (-k*(pos-target) - damping*vel)/mass
+- Semi-implicit Euler integration for smooth motion.
+
+## Interaction
+- Mouse: drag P1/P2 or whole rope.
+- Touch: move both points.
+- Reset: press R key.
+
+## Rendering
+- Curve: green
+- Control points: yellow
+- Tangents: blue
+
+## Files
+- interactive_bezier_rope.html — source code
+- rope_demo.mp4 — 20–30s screen recording

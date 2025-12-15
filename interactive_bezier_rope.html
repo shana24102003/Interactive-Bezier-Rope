@@ -1,0 +1,325 @@
+<!doctype html>
+<!--
+Interactive Cubic Bézier Rope
+File: interactive_bezier_rope.html
+
+Includes: README at the bottom (search for "README START")
+
+How to use: open this file in a modern browser (Chrome/Firefox/Safari). Drag the mouse on the canvas or move your device (if DeviceOrientation is allowed) to interact.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Interactive Cubic Bézier Rope</title>
+  <style>
+    html,body{height:100%;margin:0;background:#0e0f12;color:#ddd;font-family:Inter,system-ui,Segoe UI,Roboto,Arial}
+    #container{position:relative;height:100vh;display:flex;flex-direction:column}
+    canvas{display:block;flex:1;width:100%;height:100%}
+    .ui{position:absolute;left:12px;top:12px;background:rgba(0,0,0,0.35);padding:8px 12px;border-radius:8px;backdrop-filter:blur(4px)}
+    .ui small{display:block;color:#9aa0a6}
+    .legend{position:absolute;right:12px;top:12px;background:rgba(0,0,0,0.35);padding:8px 12px;border-radius:8px;backdrop-filter:blur(4px);text-align:right}
+    .hint{position:absolute;left:12px;bottom:12px;background:rgba(0,0,0,0.35);padding:8px;border-radius:8px}
+    a{color:#7bd389}
+  </style>
+</head>
+<body>
+  <div id="container">
+    <canvas id="c"></canvas>
+    <div class="ui" id="info">
+      <div><strong>Bezier Rope — Web</strong></div>
+      <small>Drag mouse to move control points. Device orientation is supported on mobile if enabled.</small>
+      <div id="fps"></div>
+    </div>
+    <div class="legend">
+      <div>Curve: <span style="color:#7bd389">Green</span></div>
+      <div>Control points: <span style="color:#ffd369">Yellow</span></div>
+      <div>Tangents: <span style="color:#64b5ff">Blue</span></div>
+    </div>
+    <div class="hint">Tip: Press <kbd>R</kbd> to reset.</div>
+  </div>
+
+<script>
+// ------------------------------
+// Math helpers
+// ------------------------------
+function lerp(a,b,t){return a+(b-a)*t}
+function vec(x,y){return {x:x||0,y:y||0}}
+function add(a,b){return {x:a.x+b.x,y:a.y+b.y}}
+function sub(a,b){return {x:a.x-b.x,y:a.y-b.y}}
+function mul(a,s){return {x:a.x*s,y:a.y*s}}
+function length(v){return Math.hypot(v.x,v.y)}
+function normalize(v){const L=length(v)||1; return {x:v.x/L,y:v.y/L}}
+
+// ------------------------------
+// Cubic Bezier & derivative
+// ------------------------------
+function bezierPoint(t,P0,P1,P2,P3){
+  const u=1-t;
+  const u3=u*u*u;
+  const u2t=3*u*u*t;
+  const ut2=3*u*t*t;
+  const t3=t*t*t;
+  return {
+    x: u3*P0.x + u2t*P1.x + ut2*P2.x + t3*P3.x,
+    y: u3*P0.y + u2t*P1.y + ut2*P2.y + t3*P3.y
+  };
+}
+function bezierTangent(t,P0,P1,P2,P3){
+  const u=1-t;
+  // B'(t) = 3(1−t)²(P1−P0) + 6(1−t)t(P2−P1) + 3t²(P3−P2)
+  const a = mul(sub(P1,P0), 3*u*u);
+  const b = mul(sub(P2,P1), 6*u*t);
+  const c = mul(sub(P3,P2), 3*t*t);
+  return add(add(a,b),c);
+}
+
+// ------------------------------
+// Spring particle for control points
+// ------------------------------
+class SpringPoint{
+  constructor(x,y){
+    this.pos=vec(x,y);
+    this.vel=vec(0,0);
+    this.target=vec(x,y);
+    this.mass=1;
+    this.k=60; // spring stiffness
+    this.damping=12; // damping
+  }
+  step(dt){
+    // simple spring-damper: a = (-k*(x-target) - damping*v) / mass
+    const displacement = sub(this.pos,this.target);
+    const springForce = mul(displacement, -this.k);
+    const dampForce = mul(this.vel, -this.damping);
+    const acc = mul(add(springForce,dampForce), 1/this.mass);
+    // semi-implicit Euler
+    this.vel.x += acc.x*dt;
+    this.vel.y += acc.y*dt;
+    this.pos.x += this.vel.x*dt;
+    this.pos.y += this.vel.y*dt;
+  }
+}
+
+// ------------------------------
+// Application
+// ------------------------------
+(function(){
+  const canvas=document.getElementById('c');
+  const ctx=canvas.getContext('2d');
+  let W=canvas.width=window.innerWidth;
+  let H=canvas.height=window.innerHeight;
+
+  const P0=vec(W*0.1,H*0.5);
+  const P3=vec(W*0.9,H*0.5);
+  // initial control points
+  const cp1=new SpringPoint(W*0.3,H*0.35);
+  const cp2=new SpringPoint(W*0.7,H*0.65);
+
+  // tune spring params for ropey behavior
+  cp1.k=40; cp1.damping=9; cp1.mass=1.0;
+  cp2.k=40; cp2.damping=9; cp2.mass=1.0;
+
+  // interaction
+  let isDragging=false;
+  let dragTarget=null; // 'p1' or 'p2' or null
+  const mouse=vec(0,0);
+  let lastT=performance.now();
+  let fps=0, frames=0, fpsTime=0;
+
+  function resize(){
+    W=canvas.width=window.innerWidth;
+    H=canvas.height=window.innerHeight;
+    // keep endpoints in left/right quarters
+    P0.x=W*0.08; P0.y=H*0.5;
+    P3.x=W*0.92; P3.y=H*0.5;
+  }
+  window.addEventListener('resize',resize);
+
+  // mouse/touch events
+  canvas.addEventListener('mousedown', (e)=>{
+    const r=canvas.getBoundingClientRect();
+    const x=e.clientX - r.left, y=e.clientY - r.top;
+    // if near a control point, start dragging that; else set both targets toward mouse
+    if(length(sub(vec(x,y), cp1.pos))<24){ isDragging=true; dragTarget='p1'; }
+    else if(length(sub(vec(x,y), cp2.pos))<24){ isDragging=true; dragTarget='p2'; }
+    else { isDragging=true; dragTarget='both'; }
+    mouse.x=x; mouse.y=y;
+  });
+  window.addEventListener('mousemove', (e)=>{
+    const r=canvas.getBoundingClientRect(); mouse.x=e.clientX - r.left; mouse.y=e.clientY - r.top;
+    if(isDragging){
+      if(dragTarget==='p1'){ cp1.target.x=mouse.x; cp1.target.y=mouse.y; }
+      else if(dragTarget==='p2'){ cp2.target.x=mouse.x; cp2.target.y=mouse.y; }
+      else { // both
+        cp1.target.x = lerp(cp1.target.x, mouse.x - 60, 0.25);
+        cp1.target.y = lerp(cp1.target.y, mouse.y - 60, 0.25);
+        cp2.target.x = lerp(cp2.target.x, mouse.x + 60, 0.25);
+        cp2.target.y = lerp(cp2.target.y, mouse.y + 60, 0.25);
+      }
+    }
+  });
+  window.addEventListener('mouseup', ()=>{ isDragging=false; dragTarget=null; });
+  // touch support
+  canvas.addEventListener('touchstart',(e)=>{ e.preventDefault(); const t=e.touches[0]; const r=canvas.getBoundingClientRect(); mouse.x=t.clientX-r.left; mouse.y=t.clientY-r.top; isDragging=true; dragTarget='both'; });
+  window.addEventListener('touchmove',(e)=>{ e.preventDefault(); const t=e.touches[0]; const r=canvas.getBoundingClientRect(); mouse.x=t.clientX-r.left; mouse.y=t.clientY-r.top; if(isDragging){ cp1.target.x=mouse.x-60; cp1.target.y=mouse.y-60; cp2.target.x=mouse.x+60; cp2.target.y=mouse.y+60; } });
+  window.addEventListener('touchend',(e)=>{ isDragging=false; dragTarget=null; });
+
+  // keyboard
+  window.addEventListener('keydown',(e)=>{ if(e.key==='r' || e.key==='R') reset(); });
+
+  // optional device orientation to influence targets (mobile browsers may ask for permission)
+  if(window.DeviceOrientationEvent){
+    // modern iOS requires a permission call — do it on first touch/click
+    function handleOrientation(e){
+      // gamma: left-right tilt [-90,90], beta: front-back [-180,180]
+      const g=e.gamma||0, b=e.beta||0;
+      // map to target offset
+      const centerX=W*0.5 + (g/45)*W*0.15; // tilt moves horizontally
+      const centerY=H*0.5 + ((b-90)/90)*H*0.15; // adjust vertical mapping
+      cp1.target.x = lerp(cp1.target.x, centerX - 120, 0.05);
+      cp1.target.y = lerp(cp1.target.y, centerY - 60, 0.05);
+      cp2.target.x = lerp(cp2.target.x, centerX + 120, 0.05);
+      cp2.target.y = lerp(cp2.target.y, centerY + 60, 0.05);
+    }
+    // request permission if needed (iOS)
+    function requestDeviceOrientationPermission(){
+      if(typeof DeviceOrientationEvent.requestPermission === 'function'){
+        DeviceOrientationEvent.requestPermission().then(response=>{
+          if(response==='granted') window.addEventListener('deviceorientation', handleOrientation);
+        }).catch(()=>{});
+      } else {
+        window.addEventListener('deviceorientation', handleOrientation);
+      }
+      // remove the click listener if any
+      window.removeEventListener('pointerdown', requestDeviceOrientationPermission);
+    }
+    // ask for permission on first interaction
+    window.addEventListener('pointerdown', requestDeviceOrientationPermission);
+  }
+
+  function reset(){
+    cp1.pos.x=W*0.3; cp1.pos.y=H*0.35; cp1.vel={x:0,y:0}; cp1.target.x=W*0.3; cp1.target.y=H*0.35;
+    cp2.pos.x=W*0.7; cp2.pos.y=H*0.65; cp2.vel={x:0,y:0}; cp2.target.x=W*0.7; cp2.target.y=H*0.65;
+  }
+
+  // drawing helpers
+  function clear(){ ctx.clearRect(0,0,W,H); ctx.fillStyle='#0e0f12'; ctx.fillRect(0,0,W,H); }
+
+  function draw(){
+    clear();
+    // sample curve
+    ctx.lineWidth=3; ctx.lineJoin='round'; ctx.lineCap='round';
+    // draw curve path
+    ctx.beginPath();
+    const step=0.01; // fine sampling
+    for(let t=0;t<=1+1e-6;t+=step){
+      const p=bezierPoint(t,P0,cp1.pos,cp2.pos,P3);
+      if(t===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+    }
+    ctx.strokeStyle='#7bd389'; ctx.stroke();
+
+    // draw tangents at intervals
+    const tanInterval=0.06;
+    ctx.lineWidth=2;
+    for(let t=0;t<=1;t+=tanInterval){
+      const p=bezierPoint(t,P0,cp1.pos,cp2.pos,P3);
+      const tan=bezierTangent(t,P0,cp1.pos,cp2.pos,P3);
+      const n = normalize(tan);
+      const len=28; // length of tangent line
+      ctx.beginPath(); ctx.moveTo(p.x - n.x*len, p.y - n.y*len); ctx.lineTo(p.x + n.x*len, p.y + n.y*len);
+      ctx.strokeStyle='#64b5ff'; ctx.stroke();
+    }
+
+    // draw control polygon (for clarity)
+    ctx.lineWidth=1.2; ctx.setLineDash([6,6]);
+    ctx.beginPath(); ctx.moveTo(P0.x,P0.y); ctx.lineTo(cp1.pos.x,cp1.pos.y); ctx.lineTo(cp2.pos.x,cp2.pos.y); ctx.lineTo(P3.x,P3.y);
+    ctx.strokeStyle='rgba(255,211,105,0.35)'; ctx.stroke(); ctx.setLineDash([]);
+
+    // draw endpoints and control points
+    function drawPoint(p, r, fill, stroke){ ctx.beginPath(); ctx.arc(p.x,p.y,r,0,Math.PI*2); ctx.fillStyle=fill; ctx.fill(); if(stroke){ ctx.lineWidth=2; ctx.strokeStyle=stroke; ctx.stroke(); } }
+    drawPoint(P0,8,'#ffd369','rgba(0,0,0,0.5)');
+    drawPoint(P3,8,'#ffd369','rgba(0,0,0,0.5)');
+    drawPoint(cp1.pos,7,'#ffd369','#000000');
+    drawPoint(cp2.pos,7,'#ffd369','#000000');
+
+    // small labels
+    ctx.fillStyle='#ddd'; ctx.font='12px sans-serif'; ctx.fillText('P0',P0.x-26,P0.y-10); ctx.fillText('P1',cp1.pos.x-10,cp1.pos.y-12);
+    ctx.fillText('P2',cp2.pos.x-10,cp2.pos.y+20); ctx.fillText('P3',P3.x+8,P3.y-10);
+  }
+
+  // main loop
+  function frame(now){
+    const dt = Math.min(0.05, (now - lastT)/1000); // clamp dt to avoid huge steps
+    lastT=now;
+
+    // update springs
+    // If not dragging, gently pull targets back to default positions (so rope rests)
+    if(!isDragging){
+      // relaxed default targets near initial layout
+      const default1=vec(W*0.3,H*0.35);
+      const default2=vec(W*0.7,H*0.65);
+      cp1.target.x = lerp(cp1.target.x, default1.x, 0.02);
+      cp1.target.y = lerp(cp1.target.y, default1.y, 0.02);
+      cp2.target.x = lerp(cp2.target.x, default2.x, 0.02);
+      cp2.target.y = lerp(cp2.target.y, default2.y, 0.02);
+    }
+
+    cp1.step(dt);
+    cp2.step(dt);
+
+    draw();
+
+    // fps calc
+    frames++; fpsTime += dt; if(fpsTime>0.5){ fps = Math.round(frames / fpsTime); document.getElementById('fps').innerText = fps+' FPS'; frames=0; fpsTime=0; }
+
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+
+  // initialize
+  reset();
+})();
+</script>
+
+<!-- README START
+
+# Interactive Cubic Bézier Rope (Web)
+
+## Overview
+This single-file demo (`interactive_bezier_rope.html`) implements a cubic Bézier curve that behaves like a springy rope. It samples the curve with t steps of 0.01, visualizes tangents using the analytic derivative, and animates the two middle control points using a simple spring-damper model.
+
+## Math
+- Bézier point: B(t) = (1−t)^3 P0 + 3(1−t)^2 t P1 + 3(1−t) t^2 P2 + t^3 P3.
+- Tangent (derivative):
+  B'(t) = 3(1−t)^2 (P1 − P0) + 6(1−t)t (P2 − P1) + 3 t^2 (P3 − P2).
+- Tangent vectors are normalized and drawn as short lines along the path.
+
+## Physics Model (Spring-Damper)
+Each dynamic control point is modeled as a mass with velocity and position. The acceleration is computed as:
+
+    a = (-k * (pos - target) - damping * velocity) / mass
+
+We integrate using semi-implicit Euler: v += a * dt; pos += v * dt. This produces a stable, smooth, springy response resembling a rope when the control points are driven by input.
+
+## Interaction
+- Mouse: Click/drag near P1 or P2 to drag those points. Click/drag elsewhere to pull both points toward the pointer (rope move).
+- Touch: Touch to move (mobile friendly).
+- Device orientation: On mobile, the demo attempts to use DeviceOrientation (tilt) to shift the control point targets; iOS Safari may ask for permission on first interaction.
+- Press `R` to reset to rest position.
+
+## Files
+- `interactive_bezier_rope.html` — single file containing all code and the README.
+
+## Design Choices
+- Sampling step 0.01 gives smooth curves at 60fps without GPU acceleration.
+- Tangents are computed analytically (derivative) for accuracy.
+- Spring constants chosen by feel for pleasing rope-like behavior; you can tune `k`, `damping`, and `mass` in the code for different stiffness.
+- Semi-implicit Euler was chosen for simplicity and acceptable stability.
+
+## Recording (submission)
+To make the required ~30s screen recording:
+1. Open the file in a browser and interact (drag mouse, tilt phone). 2. Use your OS screen recorder (or browser extension) to capture a 20–30s clip showing interaction and tangents.
+
+README END -->
+</body>
+</html>
